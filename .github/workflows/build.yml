@@ -1,0 +1,123 @@
+name: Build Candstech EQ APK - Auto Extract ZIP di Server
+
+# CARA PAKAI: Upload ZIP project kamu (misal CandstechEQ.zip) ke repo ini
+# via Add file > Upload files, TANPA extract di HP/laptop.
+# Workflow ini yang akan extract ZIP-nya di server GitHub, lalu build APK-nya.
+# Jadi kamu cukup: Upload ZIP > Commit > Tunggu Actions hijau > Download APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-from-zip:
+    name: Extract ZIP di Server + Build APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Cari & Extract ZIP di server
+        id: extract
+        run: |
+          echo "=== Isi repo ==="
+          ls -lh
+          echo ""
+          echo "=== Cari file ZIP ==="
+          ZIP_FILE=$(ls *.zip 2>/dev/null | head -n 1 || true)
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Ketemu ZIP: $ZIP_FILE"
+            echo "Extract di server..."
+            mkdir -p extracted
+            unzip -q "$ZIP_FILE" -d extracted
+            echo "Hasil extract:"
+            ls -lh extracted/
+            find extracted -maxdepth 3 -name "settings.gradle.kts" -o -name "build.gradle.kts" | head -n 20
+            echo "zip_found=true" >> $GITHUB_OUTPUT
+            echo "zip_file=$ZIP_FILE" >> $GITHUB_OUTPUT
+          else
+            echo "Tidak ada ZIP, pakai project yang sudah ter-extract di repo"
+            echo "zip_found=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Cari folder project & Build APK
+        run: |
+          # Tentukan PROJECT_DIR
+          if [ "${{ steps.extract.outputs.zip_found }}" = "true" ]; then
+            # Cari settings.gradle.kts di dalam extracted/
+            PROJECT_DIR=$(find extracted -name "settings.gradle.kts" -exec dirname {} \; | head -n 1)
+            if [ -z "$PROJECT_DIR" ]; then
+              # Fallback: kalau ZIP isinya langsung file project tanpa settings (jarang)
+              PROJECT_DIR="extracted"
+            fi
+          else
+            # Tidak ada ZIP, project ada di root repo
+            PROJECT_DIR="."
+            # Cek kalau project ada di subfolder CandstechEQ/
+            if [ -f "CandstechEQ/settings.gradle.kts" ]; then
+              PROJECT_DIR="CandstechEQ"
+            fi
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          ls -lh "$PROJECT_DIR"
+          echo "--- Build dari $PROJECT_DIR ---"
+          cd "$PROJECT_DIR"
+          gradle :app:assembleDebug --stacktrace
+
+      - name: Kumpulkan APK
+        run: |
+          mkdir -p out
+          echo "Cari APK di $PROJECT_DIR"
+          find "$PROJECT_DIR" -name "app-debug.apk" | head -n 5
+          APK=$(find "$PROJECT_DIR" -name "app-debug.apk" | head -n 1)
+          if [ -z "$APK" ]; then
+            echo "APK tidak ketemu!"
+            exit 1
+          fi
+          cp "$APK" out/CandstechEQ-debug.apk
+          ls -lh out/
+
+      - name: Upload APK (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CandstechEQ-debug-APK
+          path: out/CandstechEQ-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Build Release juga (opsional)
+        continue-on-error: true
+        run: |
+          cd "$PROJECT_DIR"
+          gradle :app:assembleRelease --stacktrace || echo "Release skip, pakai Debug saja"
+
+      - name: Upload Release APK
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: CandstechEQ-release-APK
+          path: |
+            out/CandstechEQ-release.apk
+            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
+          retention-days: 30
