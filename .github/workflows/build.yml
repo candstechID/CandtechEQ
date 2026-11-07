@@ -1,210 +1,72 @@
-name: Universal Android Build - FIXED Compose Plugin + Auto Patch
-
-# FIX ERROR DI SCREENSHOT:
-# Plugin [id: 'org.jetbrains.kotlin.plugin.compose', version: '1.9.24'] was not found
-# Penyebab: Plugin compose sebagai plugin terpisah baru ada di Kotlin 2.0.0+.
-# Di Kotlin 1.9.24 plugin itu TIDAK ADA di Gradle Plugin Portal, jadi build gagal.
-# Solusi: Workflow ini AUTO-PATCH di server sebelum build:
-# - Kotlin 1.9.24 -> 2.0.21 (android + compose plugin)
-# - Hapus composeOptions kotlinCompilerExtensionVersion lama (diurus plugin 2.0)
-# Kamu TIDAK perlu upload ulang ZIP, workflow yang betulin di server.
+name: Extract + Auto Patch Compose + Build APK (CLEAN v6)
 
 on:
-  push:
-    branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
   workflow_dispatch:
-    inputs:
-      zip_file:
-        description: 'Nama ZIP (kosongkan = auto cari)'
-        required: false
-        default: ''
-      module:
-        description: 'Module (kosongkan = auto)'
-        required: false
-        default: ''
-      build_variant:
-        description: 'Build variant'
-        required: false
-        default: 'debug'
-        type: choice
-        options: [debug, release]
-      java_version:
-        description: 'Java version'
-        required: false
-        default: '17'
-        type: choice
-        options: ['17', '21', '11']
-
-permissions:
-  contents: read
-  actions: write
 
 jobs:
-  build-universal:
-    name: Extract + Auto Patch Compose + Build APK
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - name: Hapus Cache Otomatis - AWAL
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Clean + Extract SATU ZIP saja
         run: |
-          rm -rf ~/.gradle/caches ~/.gradle/wrapper ~/.gradle/daemon
-          rm -rf ~/.m2/repository ~/.android/build-cache
-          rm -rf extracted out app/build build
-          gh cache list || true
-          gh cache delete --all --confirm || echo "Cache sudah bersih"
-          find . -name "*.apk" -delete || true
-          echo "Bersih!"
-
-      - name: Extract ZIP + Cari PROJECT_DIR (FIXED)
-        id: extract
-        run: |
-          ls -lh
-          if [ -n "${{ inputs.zip_file }}" ]; then ARCHIVE="${{ inputs.zip_file }}"; else ARCHIVE=$(ls *.zip *.tar.gz *.tgz 2>/dev/null | head -n 1 || true); fi
-          echo "ARCHIVE=$ARCHIVE"
-          ZIP_FOUND="false"
-          if [ -n "$ARCHIVE" ] && [ -f "$ARCHIVE" ]; then
-            echo "Ketemu: $ARCHIVE, extract..."
-            mkdir -p extracted
-            case "$ARCHIVE" in
-              *.zip) unzip -q "$ARCHIVE" -d extracted ;;
-              *.tar.gz|*.tgz) tar -xzf "$ARCHIVE" -C extracted ;;
-              *) unzip -q "$ARCHIVE" -d extracted || true ;;
-            esac
-            ls -lh extracted/
-            ZIP_FOUND="true"
-          else
-            echo "Tidak ada ZIP, pakai file ter-extract"
-            ZIP_FOUND="false"
+          rm -rf extracted
+          mkdir -p extracted
+          # Ambil HANYA 1 ZIP (yang pertama). Kalau ada >1 ZIP, yang lain diabaikan biar tidak dobel file _1
+          ZIP=$(ls -t *.zip | head -n 1)
+          echo "ZIP dipakai: $ZIP"
+          echo "Semua ZIP di repo:"
+          ls -l *.zip
+          unzip -q "$ZIP" -d extracted
+          echo "--- Cek file dobel _1 / _2 (penyebab Redeclaration) ---"
+          find extracted -name "*_1.kt" -o -name "*_2.kt" | tee /tmp/dup.txt || true
+          if [ -s /tmp/dup.txt ]; then
+            echo "HAPUS file dobel _1/_2 yang kebawa di ZIP:"
+            cat /tmp/dup.txt
+            rm -f $(cat /tmp/dup.txt)
           fi
-          echo "zip_found=$ZIP_FOUND" >> $GITHUB_OUTPUT
-          PROJECT_DIR=""
-          if [ "$ZIP_FOUND" = "true" ]; then
-            FOUND=$(find extracted -name "settings.gradle.kts" -o -name "settings.gradle" -o -name "pubspec.yaml" | head -n 1)
-            if [ -n "$FOUND" ]; then PROJECT_DIR=$(dirname "$FOUND"); else PROJECT_DIR="extracted"; fi
-          else
-            PROJECT_DIR="."
-            if [ -f "CandstechEQ/settings.gradle.kts" ]; then PROJECT_DIR="CandstechEQ"; fi
-          fi
+          echo "--- Struktur ---"
+          find extracted -maxdepth 3 -type d | head -n 20
+          # Cari PROJECT_DIR (folder yang ada settings.gradle.kts)
+          PROJECT_DIR=$(find extracted -name "settings.gradle.kts" -exec dirname {} \; | head -n 1)
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
-          echo "project_dir=$PROJECT_DIR" >> $GITHUB_OUTPUT
-          ls -lh "$PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR"
 
-      - name: AUTO-PATCH Compose Plugin 1.9.24 -> 2.0.21 (FIX ERROR SCREENSHOT)
+      - name: Auto Patch Compose 2.0.21 + hapus composeOptions
         run: |
-          echo "=== Cek build.gradle.kts ==="
-          cat "$PROJECT_DIR/build.gradle.kts" || true
-          echo ""
-          echo "=== Auto-patch kalau ketemu Kotlin 1.9.x + compose plugin ==="
-          python3 - << 'PYEOF'
-          import os, re, pathlib
-          proj = os.environ.get("PROJECT_DIR", ".")
-          root = pathlib.Path(proj) / "build.gradle.kts"
-          app = pathlib.Path(proj) / "app" / "build.gradle.kts"
-          # 1. Root build.gradle.kts: 1.9.24 -> 2.0.21
-          if root.exists():
-              txt = root.read_text()
-              orig = txt
-              # Ganti semua 1.9.24 / 1.9.20 / 1.9.0 yang nempel di kotlin plugin jadi 2.0.21
-              txt = txt.replace('"1.9.24"', '"2.0.21"').replace("'1.9.24'", "'2.0.21'")
-              txt = txt.replace('"1.9.20"', '"2.0.21"').replace('"1.9.0"', '"2.0.21"')
-              # Kalau masih ada compose plugin versi 1.x, paksa ke 2.0.21
-              txt = re.sub(r'(org\.jetbrains\.kotlin\.plugin\.compose["\']\s*,?\s*version\s*=\s*["\'])1\.[0-9.]+(["\'])', r'\g<1>2.0.21\g<2>', txt)
-              txt = re.sub(r'(id\("org\.jetbrains\.kotlin\.plugin\.compose"\)\s*version\s*["\'])1\.[0-9.]+(["\'])', r'\g<1>2.0.21\g<2>', txt)
-              # Umum: id("org.jetbrains.kotlin.android") version "1.9..." -> 2.0.21
-              txt = re.sub(r'(id\("org\.jetbrains\.kotlin\.android"\)\s*version\s*["\'])1\.[0-9.]+(["\'])', r'\g<1>2.0.21\g<2>', txt)
-              if txt != orig:
-                  root.write_text(txt)
-                  print("PATCHED root build.gradle.kts 1.9.x -> 2.0.21")
-                  print(txt)
-              else:
-                  print("Root sudah OK, tidak perlu patch")
-          # 2. App build.gradle.kts: hapus composeOptions lama (diurus plugin 2.0)
-          if app.exists():
-              txt2 = app.read_text()
-              orig2 = txt2
-              # Hapus baris composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
-              txt2 = re.sub(r'\s*composeOptions\s*\{[^}]*\}', '', txt2)
-              # Kalau masih ada kotlinCompilerExtensionVersion, hapus
-              txt2 = re.sub(r'.*kotlinCompilerExtensionVersion.*\n', '', txt2)
-              if txt2 != orig2:
-                  app.write_text(txt2)
-                  print("PATCHED app build.gradle.kts: hapus composeOptions lama")
-                  print(txt2)
-              else:
-                  print("App sudah OK")
-          PYEOF
-          echo ""
-          echo "=== Hasil setelah patch ==="
+          echo "Patch di $PROJECT_DIR"
+          # Root build.gradle.kts -> paksa 2.0.21
+          sed -i 's/version "2\.0\.0"/version "2.0.21"/g; s/version "2\.0\.20"/version "2.0.21"/g' "$PROJECT_DIR/build.gradle.kts" || true
+          # App build.gradle.kts -> hapus composeOptions lama (penyebab error composeOptions)
+          python3 - << 'PY'
+          import pathlib, re, os
+          p = pathlib.Path(os.environ["PROJECT_DIR"]) / "app/build.gradle.kts"
+          t = p.read_text()
+          t = re.sub(r'\s*composeOptions\s*\{[^}]*\}', '', t)
+          p.write_text(t)
+          print("composeOptions dihapus, sisa composeOptions?", "composeOptions" in t)
+          PY
           cat "$PROJECT_DIR/build.gradle.kts"
-          echo "--- app/build.gradle.kts ---"
-          cat "$PROJECT_DIR/app/build.gradle.kts" | head -n 50
 
-      - name: Deteksi Jenis & Module
-        id: detect
-        run: |
-          if [ -f "$PROJECT_DIR/pubspec.yaml" ]; then echo "type=flutter" >> $GITHUB_OUTPUT; else echo "type=android-gradle" >> $GITHUB_OUTPUT; fi
-          if [ -n "${{ inputs.module }}" ]; then MODULE="${{ inputs.module }}"; else MODULE_FILE=$(grep -l "com.android.application" $(find "$PROJECT_DIR" -maxdepth 3 -name "build.gradle*" 2>/dev/null) 2>/dev/null | head -n 1 || true); if [ -n "$MODULE_FILE" ]; then MODULE=$(basename $(dirname "$MODULE_FILE")); else MODULE="app"; fi; fi
-          echo "MODULE=$MODULE" >> $GITHUB_ENV
-          echo "module=$MODULE" >> $GITHUB_OUTPUT
-          echo "Module: $MODULE"
-          if [ -f "$PROJECT_DIR/gradlew" ]; then echo "gradle_cmd=./gradlew" >> $GITHUB_OUTPUT; chmod +x "$PROJECT_DIR/gradlew" || true; else echo "gradle_cmd=gradle" >> $GITHUB_OUTPUT; fi
-
-      - name: Set up JDK
-        uses: actions/setup-java@v5
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
-          java-version: ${{ inputs.java_version || '17' }}
-          distribution: 'temurin'
+          distribution: temurin
+          java-version: '17'
 
       - name: Set up Android SDK
-        if: steps.detect.outputs.type != 'flutter'
-        uses: android-actions/setup-android@v4
-
-      - name: Set up Gradle (cache dimatikan)
-        if: steps.detect.outputs.type != 'flutter'
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
-          cache-disabled: true
+        uses: android-actions/setup-android@v3
 
       - name: Build APK - Android Gradle
-        if: steps.detect.outputs.type != 'flutter'
         run: |
           cd "$PROJECT_DIR"
-          VARIANT="${{ inputs.build_variant || 'debug' }}"
-          if [ "$VARIANT" = "release" ]; then TASK="assembleRelease"; else TASK="assembleDebug"; fi
-          echo "Jalanin: ${{ steps.detect.outputs.gradle_cmd }} :$MODULE:$TASK"
-          ${{ steps.detect.outputs.gradle_cmd }} :$MODULE:$TASK --stacktrace --no-build-cache --rerun-tasks || ${{ steps.detect.outputs.gradle_cmd }} assembleDebug --stacktrace --no-build-cache
-
-      - name: Kumpulkan APK
-        run: |
-          mkdir -p out
-          find "$PROJECT_DIR" -name "*.apk" | head -n 20
-          find "$PROJECT_DIR" -name "*.apk" -exec cp {} out/ \; || true
-          REPO_NAME=$(basename "$GITHUB_REPOSITORY")
-          if [ -f "out/app-debug.apk" ]; then cp "out/app-debug.apk" "out/${REPO_NAME}-debug.apk" || true; fi
-          ls -lh out/
+          chmod +x gradlew || true
+          if [ -f gradlew ]; then ./gradlew assembleDebug --stacktrace; else gradle assembleDebug --stacktrace; fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.repository.name }}-APK
-          path: out/*.apk
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Hapus Cache Otomatis - AKHIR
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          rm -rf ~/.gradle/caches ~/.gradle/wrapper ~/.gradle/daemon
-          rm -rf ~/.m2/repository extracted
-          rm -rf "$PROJECT_DIR/app/build" "$PROJECT_DIR/build"
-          gh cache delete --all --confirm || echo "Cache sudah bersih"
-          echo "Selesai."
+          name: CandstechEQ-debug
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          
