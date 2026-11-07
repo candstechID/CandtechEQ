@@ -1,9 +1,8 @@
-name: Build Candstech EQ APK - Auto Extract ZIP di Server
+name: Build Candstech EQ APK - Auto Extract + Auto Hapus Cache
 
-# CARA PAKAI: Upload ZIP project kamu (misal CandstechEQ.zip) ke repo ini
-# via Add file > Upload files, TANPA extract di HP/laptop.
-# Workflow ini yang akan extract ZIP-nya di server GitHub, lalu build APK-nya.
-# Jadi kamu cukup: Upload ZIP > Commit > Tunggu Actions hijau > Download APK
+# - Extract ZIP di server (bukan di repo, bukan di cache)
+# - Cache dihapus OTOMATIS tiap build: di awal + di akhir
+# - Jadi tiap build selalu bersih, tidak pakai cache lama
 
 on:
   push:
@@ -12,36 +11,48 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+# Izin buat hapus cache GitHub via gh CLI
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   build-from-zip:
-    name: Extract ZIP di Server + Build APK
+    name: Extract ZIP + Build APK (Cache Auto Hapus)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: gradle
+      - name: Hapus Cache Otomatis - AWAL (biar build bersih)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== 1. Hapus cache lokal di Runner ==="
+          rm -rf ~/.gradle/caches ~/.gradle/wrapper ~/.gradle/daemon
+          rm -rf ~/.m2/repository
+          rm -rf ~/.android/build-cache
+          rm -rf extracted out
+          rm -rf app/build app/.cxx build
+          echo "Cache lokal dihapus."
+          echo ""
+          echo "=== 2. Hapus cache GitHub Actions (server) ==="
+          echo "Cek daftar cache..."
+          gh cache list || echo "Tidak ada cache / gh belum siap"
+          echo "Hapus semua cache..."
+          gh cache delete --all --confirm || echo "Tidak ada cache yang perlu dihapus / sudah bersih"
+          echo ""
+          echo "=== 3. Hapus sisa build lama ==="
+          find . -name "*.apk" -delete || true
+          find . -name "*.aab" -delete || true
+          echo "Bersih! Siap extract ZIP baru."
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Set up Gradle 8.7
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.7'
-
-      - name: Cari & Extract ZIP di server
+      - name: Cari & Extract ZIP di server (PALING DULU!)
         id: extract
         run: |
           echo "=== Isi repo ==="
           ls -lh
           echo ""
-          echo "=== Cari file ZIP ==="
           ZIP_FILE=$(ls *.zip 2>/dev/null | head -n 1 || true)
           if [ -n "$ZIP_FILE" ]; then
             echo "Ketemu ZIP: $ZIP_FILE"
@@ -50,43 +61,52 @@ jobs:
             unzip -q "$ZIP_FILE" -d extracted
             echo "Hasil extract:"
             ls -lh extracted/
-            find extracted -maxdepth 3 -name "settings.gradle.kts" -o -name "build.gradle.kts" | head -n 20
             echo "zip_found=true" >> $GITHUB_OUTPUT
-            echo "zip_file=$ZIP_FILE" >> $GITHUB_OUTPUT
           else
-            echo "Tidak ada ZIP, pakai project yang sudah ter-extract di repo"
+            echo "Tidak ada ZIP, pakai project yang sudah ter-extract"
             echo "zip_found=false" >> $GITHUB_OUTPUT
           fi
-
-      - name: Cari folder project & Build APK
-        run: |
-          # Tentukan PROJECT_DIR
           if [ "${{ steps.extract.outputs.zip_found }}" = "true" ]; then
-            # Cari settings.gradle.kts di dalam extracted/
             PROJECT_DIR=$(find extracted -name "settings.gradle.kts" -exec dirname {} \; | head -n 1)
             if [ -z "$PROJECT_DIR" ]; then
-              # Fallback: kalau ZIP isinya langsung file project tanpa settings (jarang)
               PROJECT_DIR="extracted"
             fi
           else
-            # Tidak ada ZIP, project ada di root repo
             PROJECT_DIR="."
-            # Cek kalau project ada di subfolder CandstechEQ/
             if [ -f "CandstechEQ/settings.gradle.kts" ]; then
               PROJECT_DIR="CandstechEQ"
             fi
           fi
           echo "PROJECT_DIR=$PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "project_dir=$PROJECT_DIR" >> $GITHUB_OUTPUT
           ls -lh "$PROJECT_DIR"
-          echo "--- Build dari $PROJECT_DIR ---"
+
+      - name: Set up JDK 17 (TANPA cache)
+        uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          # cache sengaja TIDAK dipakai, biar tidak bikin error + tidak nyimpen cache
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Set up Gradle 8.7 (cache dimatikan)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+          cache-disabled: true
+
+      - name: Build APK (tanpa cache)
+        run: |
+          echo "Build dari: $PROJECT_DIR (tanpa cache)"
           cd "$PROJECT_DIR"
-          gradle :app:assembleDebug --stacktrace
+          gradle :app:assembleDebug --stacktrace --no-build-cache --rerun-tasks
 
       - name: Kumpulkan APK
         run: |
           mkdir -p out
-          echo "Cari APK di $PROJECT_DIR"
           find "$PROJECT_DIR" -name "app-debug.apk" | head -n 5
           APK=$(find "$PROJECT_DIR" -name "app-debug.apk" | head -n 1)
           if [ -z "$APK" ]; then
@@ -104,20 +124,16 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Build Release juga (opsional)
-        continue-on-error: true
-        run: |
-          cd "$PROJECT_DIR"
-          gradle :app:assembleRelease --stacktrace || echo "Release skip, pakai Debug saja"
-
-      - name: Upload Release APK
+      - name: Hapus Cache Otomatis - AKHIR (biar tidak numpuk)
         if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: CandstechEQ-release-APK
-          path: |
-            out/CandstechEQ-release.apk
-            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
-          if-no-files-found: warn
-          retention-days: 30
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== Bersih-bersih akhir build ==="
+          rm -rf ~/.gradle/caches ~/.gradle/wrapper ~/.gradle/daemon
+          rm -rf ~/.m2/repository
+          rm -rf extracted
+          rm -rf "$PROJECT_DIR/app/build" "$PROJECT_DIR/build"
+          echo "Coba hapus cache GitHub lagi..."
+          gh cache delete --all --confirm || echo "Cache GitHub sudah bersih"
+          echo "Selesai, cache sudah dihapus otomatis."
