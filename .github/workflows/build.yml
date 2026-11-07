@@ -1,8 +1,8 @@
-name: Build Candstech EQ APK - Auto Extract + Auto Hapus Cache
+name: Universal Android Build - FIXED PROJECT_DIR
 
-# - Extract ZIP di server (bukan di repo, bukan di cache)
-# - Cache dihapus OTOMATIS tiap build: di awal + di akhir
-# - Jadi tiap build selalu bersih, tidak pakai cache lama
+# FIX BUG: PROJECT_DIR sebelumnya salah karena ngecek output step sendiri
+# Sekarang pakai variable shell ZIP_FOUND, jadi deteksi folder project pasti bener
+# Tetap: Auto Extract ZIP + Auto Hapus Cache + Universal (Android / Flutter)
 
 on:
   push:
@@ -10,130 +10,217 @@ on:
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
+    inputs:
+      zip_file:
+        description: 'Nama ZIP (kosongkan = auto cari *.zip pertama)'
+        required: false
+        default: ''
+      module:
+        description: 'Module (kosongkan = auto deteksi, biasanya app)'
+        required: false
+        default: ''
+      build_variant:
+        description: 'Build variant'
+        required: false
+        default: 'debug'
+        type: choice
+        options: [debug, release]
+      java_version:
+        description: 'Java version'
+        required: false
+        default: '17'
+        type: choice
+        options: ['17', '21', '11']
 
-# Izin buat hapus cache GitHub via gh CLI
 permissions:
   contents: read
   actions: write
 
 jobs:
-  build-from-zip:
-    name: Extract ZIP + Build APK (Cache Auto Hapus)
+  build-universal:
+    name: Extract ZIP + Build APK (FIXED)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
 
-      - name: Hapus Cache Otomatis - AWAL (biar build bersih)
+      - name: Hapus Cache Otomatis - AWAL
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "=== 1. Hapus cache lokal di Runner ==="
           rm -rf ~/.gradle/caches ~/.gradle/wrapper ~/.gradle/daemon
-          rm -rf ~/.m2/repository
-          rm -rf ~/.android/build-cache
-          rm -rf extracted out
-          rm -rf app/build app/.cxx build
-          echo "Cache lokal dihapus."
-          echo ""
-          echo "=== 2. Hapus cache GitHub Actions (server) ==="
-          echo "Cek daftar cache..."
-          gh cache list || echo "Tidak ada cache / gh belum siap"
-          echo "Hapus semua cache..."
-          gh cache delete --all --confirm || echo "Tidak ada cache yang perlu dihapus / sudah bersih"
-          echo ""
-          echo "=== 3. Hapus sisa build lama ==="
+          rm -rf ~/.m2/repository ~/.android/build-cache
+          rm -rf extracted out app/build build
+          gh cache list || true
+          gh cache delete --all --confirm || echo "Cache sudah bersih"
           find . -name "*.apk" -delete || true
-          find . -name "*.aab" -delete || true
-          echo "Bersih! Siap extract ZIP baru."
+          echo "Bersih!"
 
-      - name: Cari & Extract ZIP di server (PALING DULU!)
+      - name: Extract ZIP di server + Cari PROJECT_DIR (FIXED)
         id: extract
         run: |
-          echo "=== Isi repo ==="
           ls -lh
-          echo ""
-          ZIP_FILE=$(ls *.zip 2>/dev/null | head -n 1 || true)
-          if [ -n "$ZIP_FILE" ]; then
-            echo "Ketemu ZIP: $ZIP_FILE"
-            echo "Extract di server..."
-            mkdir -p extracted
-            unzip -q "$ZIP_FILE" -d extracted
-            echo "Hasil extract:"
-            ls -lh extracted/
-            echo "zip_found=true" >> $GITHUB_OUTPUT
+          # 1. Cari ZIP - pakai INPUT atau auto
+          if [ -n "${{ inputs.zip_file }}" ]; then
+            ARCHIVE="${{ inputs.zip_file }}"
           else
-            echo "Tidak ada ZIP, pakai project yang sudah ter-extract"
-            echo "zip_found=false" >> $GITHUB_OUTPUT
+            ARCHIVE=$(ls *.zip *.tar.gz *.tgz 2>/dev/null | head -n 1 || true)
           fi
-          if [ "${{ steps.extract.outputs.zip_found }}" = "true" ]; then
-            PROJECT_DIR=$(find extracted -name "settings.gradle.kts" -exec dirname {} \; | head -n 1)
-            if [ -z "$PROJECT_DIR" ]; then
+          echo "ARCHIVE=$ARCHIVE"
+          # 2. Extract - pakai VARIABLE SHELL, BUKAN steps.extract.outputs (itu bug kemarin)
+          ZIP_FOUND="false"
+          if [ -n "$ARCHIVE" ] && [ -f "$ARCHIVE" ]; then
+            echo "Ketemu archive: $ARCHIVE, extract..."
+            mkdir -p extracted
+            case "$ARCHIVE" in
+              *.zip) unzip -q "$ARCHIVE" -d extracted ;;
+              *.tar.gz|*.tgz) tar -xzf "$ARCHIVE" -C extracted ;;
+              *) unzip -q "$ARCHIVE" -d extracted || true ;;
+            esac
+            ls -lh extracted/
+            ZIP_FOUND="true"
+          else
+            echo "Tidak ada ZIP, pakai file yang sudah ter-extract"
+            ZIP_FOUND="false"
+          fi
+          echo "ZIP_FOUND=$ZIP_FOUND"
+          echo "zip_found=$ZIP_FOUND" >> $GITHUB_OUTPUT
+          # 3. Cari PROJECT_DIR pakai ZIP_FOUND (shell var) - INI FIX-NYA
+          PROJECT_DIR=""
+          if [ "$ZIP_FOUND" = "true" ]; then
+            # Cari settings.gradle.kts / settings.gradle / pubspec.yaml di dalam extracted/
+            FOUND=$(find extracted -name "settings.gradle.kts" -o -name "settings.gradle" -o -name "pubspec.yaml" | head -n 1)
+            echo "FOUND=$FOUND"
+            if [ -n "$FOUND" ]; then
+              PROJECT_DIR=$(dirname "$FOUND")
+            else
               PROJECT_DIR="extracted"
             fi
           else
             PROJECT_DIR="."
-            if [ -f "CandstechEQ/settings.gradle.kts" ]; then
+            if [ -f "CandstechEQ/settings.gradle.kts" ] || [ -f "CandstechEQ/settings.gradle" ]; then
               PROJECT_DIR="CandstechEQ"
+            else
+              FOUND2=$(find . -maxdepth 2 -name "settings.gradle.kts" -o -name "settings.gradle" | head -n 1)
+              if [ -n "$FOUND2" ] && [ "$(dirname "$FOUND2")" != "." ]; then
+                PROJECT_DIR=$(dirname "$FOUND2")
+              fi
             fi
           fi
-          echo "PROJECT_DIR=$PROJECT_DIR"
+          echo "PROJECT_DIR FINAL=$PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
           echo "project_dir=$PROJECT_DIR" >> $GITHUB_OUTPUT
+          echo "=== Isi PROJECT_DIR ==="
           ls -lh "$PROJECT_DIR"
+          echo "=== Cek settings ==="
+          ls -lh "$PROJECT_DIR/settings.gradle"* || echo "settings tidak ketemu di $PROJECT_DIR"
+          # Validasi: kalau tidak ada settings, gagal dengan pesan jelas
+          if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && [ ! -f "$PROJECT_DIR/settings.gradle" ] && [ ! -f "$PROJECT_DIR/pubspec.yaml" ]; then
+            echo "ERROR: Tidak ketemu settings.gradle di $PROJECT_DIR"
+            echo "Isi extracted:"
+            find extracted -maxdepth 4 -type f | head -n 50
+            exit 1
+          fi
 
-      - name: Set up JDK 17 (TANPA cache)
+      - name: Deteksi Jenis Project & Module
+        id: detect
+        run: |
+          if [ -f "$PROJECT_DIR/pubspec.yaml" ]; then
+            echo "type=flutter" >> $GITHUB_OUTPUT
+            echo "Jenis: Flutter"
+          else
+            echo "type=android-gradle" >> $GITHUB_OUTPUT
+            echo "Jenis: Android Gradle"
+          fi
+          if [ -n "${{ inputs.module }}" ]; then
+            MODULE="${{ inputs.module }}"
+          else
+            MODULE_FILE=$(grep -l "com.android.application" $(find "$PROJECT_DIR" -maxdepth 3 -name "build.gradle*" 2>/dev/null) 2>/dev/null | head -n 1 || true)
+            if [ -n "$MODULE_FILE" ]; then
+              MODULE=$(basename $(dirname "$MODULE_FILE"))
+            else
+              MODULE="app"
+            fi
+          fi
+          echo "MODULE=$MODULE" >> $GITHUB_ENV
+          echo "module=$MODULE" >> $GITHUB_OUTPUT
+          echo "Module: $MODULE"
+          if [ -f "$PROJECT_DIR/gradlew" ]; then
+            echo "gradle_cmd=./gradlew" >> $GITHUB_OUTPUT
+            chmod +x "$PROJECT_DIR/gradlew" || true
+            echo "Pakai: ./gradlew"
+          else
+            echo "gradle_cmd=gradle" >> $GITHUB_OUTPUT
+            echo "Pakai: gradle"
+          fi
+
+      - name: Set up JDK
         uses: actions/setup-java@v5
         with:
-          java-version: '17'
+          java-version: ${{ inputs.java_version || '17' }}
           distribution: 'temurin'
-          # cache sengaja TIDAK dipakai, biar tidak bikin error + tidak nyimpen cache
 
       - name: Set up Android SDK
+        if: steps.detect.outputs.type != 'flutter'
         uses: android-actions/setup-android@v4
 
-      - name: Set up Gradle 8.7 (cache dimatikan)
+      - name: Set up Gradle (cache dimatikan)
+        if: steps.detect.outputs.type != 'flutter'
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
           cache-disabled: true
 
-      - name: Build APK (tanpa cache)
-        run: |
-          echo "Build dari: $PROJECT_DIR (tanpa cache)"
-          cd "$PROJECT_DIR"
-          gradle :app:assembleDebug --stacktrace --no-build-cache --rerun-tasks
+      - name: Set up Flutter
+        if: steps.detect.outputs.type == 'flutter'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
 
-      - name: Kumpulkan APK
+      - name: Build APK - Android Gradle
+        if: steps.detect.outputs.type != 'flutter'
+        run: |
+          echo "Build dari: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR, MODULE=$MODULE"
+          cd "$PROJECT_DIR"
+          pwd
+          ls -lh
+          VARIANT="${{ inputs.build_variant || 'debug' }}"
+          if [ "$VARIANT" = "release" ]; then TASK="assembleRelease"; else TASK="assembleDebug"; fi
+          echo "Jalanin: ${{ steps.detect.outputs.gradle_cmd }} :$MODULE:$TASK"
+          ${{ steps.detect.outputs.gradle_cmd }} :$MODULE:$TASK --stacktrace --no-build-cache --rerun-tasks || ${{ steps.detect.outputs.gradle_cmd }} assembleDebug --stacktrace --no-build-cache
+
+      - name: Build APK - Flutter
+        if: steps.detect.outputs.type == 'flutter'
+        run: |
+          cd "$PROJECT_DIR"
+          flutter pub get
+          if [ "${{ inputs.build_variant }}" = "release" ]; then flutter build apk --release; else flutter build apk --debug; fi
+
+      - name: Kumpulkan Semua APK
         run: |
           mkdir -p out
-          find "$PROJECT_DIR" -name "app-debug.apk" | head -n 5
-          APK=$(find "$PROJECT_DIR" -name "app-debug.apk" | head -n 1)
-          if [ -z "$APK" ]; then
-            echo "APK tidak ketemu!"
-            exit 1
-          fi
-          cp "$APK" out/CandstechEQ-debug.apk
+          find "$PROJECT_DIR" -name "*.apk" | head -n 20
+          find "$PROJECT_DIR" -name "*.apk" -exec cp {} out/ \; || true
+          REPO_NAME=$(basename "$GITHUB_REPOSITORY")
+          if [ -f "out/app-debug.apk" ]; then cp "out/app-debug.apk" "out/${REPO_NAME}-debug.apk" || true; fi
           ls -lh out/
 
-      - name: Upload APK (Artifact)
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: CandstechEQ-debug-APK
-          path: out/CandstechEQ-debug.apk
+          name: ${{ github.event.repository.name }}-APK
+          path: out/*.apk
           if-no-files-found: error
           retention-days: 30
 
-      - name: Hapus Cache Otomatis - AKHIR (biar tidak numpuk)
+      - name: Hapus Cache Otomatis - AKHIR
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "=== Bersih-bersih akhir build ==="
           rm -rf ~/.gradle/caches ~/.gradle/wrapper ~/.gradle/daemon
-          rm -rf ~/.m2/repository
-          rm -rf extracted
+          rm -rf ~/.m2/repository extracted
           rm -rf "$PROJECT_DIR/app/build" "$PROJECT_DIR/build"
-          echo "Coba hapus cache GitHub lagi..."
-          gh cache delete --all --confirm || echo "Cache GitHub sudah bersih"
-          echo "Selesai, cache sudah dihapus otomatis."
+          gh cache delete --all --confirm || echo "Cache sudah bersih"
+          echo "Selesai."
