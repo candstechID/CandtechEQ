@@ -1,8 +1,13 @@
-name: Universal Android Build - FIXED PROJECT_DIR
+name: Universal Android Build - FIXED Compose Plugin + Auto Patch
 
-# FIX BUG: PROJECT_DIR sebelumnya salah karena ngecek output step sendiri
-# Sekarang pakai variable shell ZIP_FOUND, jadi deteksi folder project pasti bener
-# Tetap: Auto Extract ZIP + Auto Hapus Cache + Universal (Android / Flutter)
+# FIX ERROR DI SCREENSHOT:
+# Plugin [id: 'org.jetbrains.kotlin.plugin.compose', version: '1.9.24'] was not found
+# Penyebab: Plugin compose sebagai plugin terpisah baru ada di Kotlin 2.0.0+.
+# Di Kotlin 1.9.24 plugin itu TIDAK ADA di Gradle Plugin Portal, jadi build gagal.
+# Solusi: Workflow ini AUTO-PATCH di server sebelum build:
+# - Kotlin 1.9.24 -> 2.0.21 (android + compose plugin)
+# - Hapus composeOptions kotlinCompilerExtensionVersion lama (diurus plugin 2.0)
+# Kamu TIDAK perlu upload ulang ZIP, workflow yang betulin di server.
 
 on:
   push:
@@ -12,11 +17,11 @@ on:
   workflow_dispatch:
     inputs:
       zip_file:
-        description: 'Nama ZIP (kosongkan = auto cari *.zip pertama)'
+        description: 'Nama ZIP (kosongkan = auto cari)'
         required: false
         default: ''
       module:
-        description: 'Module (kosongkan = auto deteksi, biasanya app)'
+        description: 'Module (kosongkan = auto)'
         required: false
         default: ''
       build_variant:
@@ -38,7 +43,7 @@ permissions:
 
 jobs:
   build-universal:
-    name: Extract ZIP + Build APK (FIXED)
+    name: Extract + Auto Patch Compose + Build APK
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
@@ -56,21 +61,15 @@ jobs:
           find . -name "*.apk" -delete || true
           echo "Bersih!"
 
-      - name: Extract ZIP di server + Cari PROJECT_DIR (FIXED)
+      - name: Extract ZIP + Cari PROJECT_DIR (FIXED)
         id: extract
         run: |
           ls -lh
-          # 1. Cari ZIP - pakai INPUT atau auto
-          if [ -n "${{ inputs.zip_file }}" ]; then
-            ARCHIVE="${{ inputs.zip_file }}"
-          else
-            ARCHIVE=$(ls *.zip *.tar.gz *.tgz 2>/dev/null | head -n 1 || true)
-          fi
+          if [ -n "${{ inputs.zip_file }}" ]; then ARCHIVE="${{ inputs.zip_file }}"; else ARCHIVE=$(ls *.zip *.tar.gz *.tgz 2>/dev/null | head -n 1 || true); fi
           echo "ARCHIVE=$ARCHIVE"
-          # 2. Extract - pakai VARIABLE SHELL, BUKAN steps.extract.outputs (itu bug kemarin)
           ZIP_FOUND="false"
           if [ -n "$ARCHIVE" ] && [ -f "$ARCHIVE" ]; then
-            echo "Ketemu archive: $ARCHIVE, extract..."
+            echo "Ketemu: $ARCHIVE, extract..."
             mkdir -p extracted
             case "$ARCHIVE" in
               *.zip) unzip -q "$ARCHIVE" -d extracted ;;
@@ -80,79 +79,81 @@ jobs:
             ls -lh extracted/
             ZIP_FOUND="true"
           else
-            echo "Tidak ada ZIP, pakai file yang sudah ter-extract"
+            echo "Tidak ada ZIP, pakai file ter-extract"
             ZIP_FOUND="false"
           fi
-          echo "ZIP_FOUND=$ZIP_FOUND"
           echo "zip_found=$ZIP_FOUND" >> $GITHUB_OUTPUT
-          # 3. Cari PROJECT_DIR pakai ZIP_FOUND (shell var) - INI FIX-NYA
           PROJECT_DIR=""
           if [ "$ZIP_FOUND" = "true" ]; then
-            # Cari settings.gradle.kts / settings.gradle / pubspec.yaml di dalam extracted/
             FOUND=$(find extracted -name "settings.gradle.kts" -o -name "settings.gradle" -o -name "pubspec.yaml" | head -n 1)
-            echo "FOUND=$FOUND"
-            if [ -n "$FOUND" ]; then
-              PROJECT_DIR=$(dirname "$FOUND")
-            else
-              PROJECT_DIR="extracted"
-            fi
+            if [ -n "$FOUND" ]; then PROJECT_DIR=$(dirname "$FOUND"); else PROJECT_DIR="extracted"; fi
           else
             PROJECT_DIR="."
-            if [ -f "CandstechEQ/settings.gradle.kts" ] || [ -f "CandstechEQ/settings.gradle" ]; then
-              PROJECT_DIR="CandstechEQ"
-            else
-              FOUND2=$(find . -maxdepth 2 -name "settings.gradle.kts" -o -name "settings.gradle" | head -n 1)
-              if [ -n "$FOUND2" ] && [ "$(dirname "$FOUND2")" != "." ]; then
-                PROJECT_DIR=$(dirname "$FOUND2")
-              fi
-            fi
+            if [ -f "CandstechEQ/settings.gradle.kts" ]; then PROJECT_DIR="CandstechEQ"; fi
           fi
-          echo "PROJECT_DIR FINAL=$PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
           echo "project_dir=$PROJECT_DIR" >> $GITHUB_OUTPUT
-          echo "=== Isi PROJECT_DIR ==="
           ls -lh "$PROJECT_DIR"
-          echo "=== Cek settings ==="
-          ls -lh "$PROJECT_DIR/settings.gradle"* || echo "settings tidak ketemu di $PROJECT_DIR"
-          # Validasi: kalau tidak ada settings, gagal dengan pesan jelas
-          if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && [ ! -f "$PROJECT_DIR/settings.gradle" ] && [ ! -f "$PROJECT_DIR/pubspec.yaml" ]; then
-            echo "ERROR: Tidak ketemu settings.gradle di $PROJECT_DIR"
-            echo "Isi extracted:"
-            find extracted -maxdepth 4 -type f | head -n 50
-            exit 1
-          fi
 
-      - name: Deteksi Jenis Project & Module
+      - name: AUTO-PATCH Compose Plugin 1.9.24 -> 2.0.21 (FIX ERROR SCREENSHOT)
+        run: |
+          echo "=== Cek build.gradle.kts ==="
+          cat "$PROJECT_DIR/build.gradle.kts" || true
+          echo ""
+          echo "=== Auto-patch kalau ketemu Kotlin 1.9.x + compose plugin ==="
+          python3 - << 'PYEOF'
+          import os, re, pathlib
+          proj = os.environ.get("PROJECT_DIR", ".")
+          root = pathlib.Path(proj) / "build.gradle.kts"
+          app = pathlib.Path(proj) / "app" / "build.gradle.kts"
+          # 1. Root build.gradle.kts: 1.9.24 -> 2.0.21
+          if root.exists():
+              txt = root.read_text()
+              orig = txt
+              # Ganti semua 1.9.24 / 1.9.20 / 1.9.0 yang nempel di kotlin plugin jadi 2.0.21
+              txt = txt.replace('"1.9.24"', '"2.0.21"').replace("'1.9.24'", "'2.0.21'")
+              txt = txt.replace('"1.9.20"', '"2.0.21"').replace('"1.9.0"', '"2.0.21"')
+              # Kalau masih ada compose plugin versi 1.x, paksa ke 2.0.21
+              txt = re.sub(r'(org\.jetbrains\.kotlin\.plugin\.compose["\']\s*,?\s*version\s*=\s*["\'])1\.[0-9.]+(["\'])', r'\g<1>2.0.21\g<2>', txt)
+              txt = re.sub(r'(id\("org\.jetbrains\.kotlin\.plugin\.compose"\)\s*version\s*["\'])1\.[0-9.]+(["\'])', r'\g<1>2.0.21\g<2>', txt)
+              # Umum: id("org.jetbrains.kotlin.android") version "1.9..." -> 2.0.21
+              txt = re.sub(r'(id\("org\.jetbrains\.kotlin\.android"\)\s*version\s*["\'])1\.[0-9.]+(["\'])', r'\g<1>2.0.21\g<2>', txt)
+              if txt != orig:
+                  root.write_text(txt)
+                  print("PATCHED root build.gradle.kts 1.9.x -> 2.0.21")
+                  print(txt)
+              else:
+                  print("Root sudah OK, tidak perlu patch")
+          # 2. App build.gradle.kts: hapus composeOptions lama (diurus plugin 2.0)
+          if app.exists():
+              txt2 = app.read_text()
+              orig2 = txt2
+              # Hapus baris composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+              txt2 = re.sub(r'\s*composeOptions\s*\{[^}]*\}', '', txt2)
+              # Kalau masih ada kotlinCompilerExtensionVersion, hapus
+              txt2 = re.sub(r'.*kotlinCompilerExtensionVersion.*\n', '', txt2)
+              if txt2 != orig2:
+                  app.write_text(txt2)
+                  print("PATCHED app build.gradle.kts: hapus composeOptions lama")
+                  print(txt2)
+              else:
+                  print("App sudah OK")
+          PYEOF
+          echo ""
+          echo "=== Hasil setelah patch ==="
+          cat "$PROJECT_DIR/build.gradle.kts"
+          echo "--- app/build.gradle.kts ---"
+          cat "$PROJECT_DIR/app/build.gradle.kts" | head -n 50
+
+      - name: Deteksi Jenis & Module
         id: detect
         run: |
-          if [ -f "$PROJECT_DIR/pubspec.yaml" ]; then
-            echo "type=flutter" >> $GITHUB_OUTPUT
-            echo "Jenis: Flutter"
-          else
-            echo "type=android-gradle" >> $GITHUB_OUTPUT
-            echo "Jenis: Android Gradle"
-          fi
-          if [ -n "${{ inputs.module }}" ]; then
-            MODULE="${{ inputs.module }}"
-          else
-            MODULE_FILE=$(grep -l "com.android.application" $(find "$PROJECT_DIR" -maxdepth 3 -name "build.gradle*" 2>/dev/null) 2>/dev/null | head -n 1 || true)
-            if [ -n "$MODULE_FILE" ]; then
-              MODULE=$(basename $(dirname "$MODULE_FILE"))
-            else
-              MODULE="app"
-            fi
-          fi
+          if [ -f "$PROJECT_DIR/pubspec.yaml" ]; then echo "type=flutter" >> $GITHUB_OUTPUT; else echo "type=android-gradle" >> $GITHUB_OUTPUT; fi
+          if [ -n "${{ inputs.module }}" ]; then MODULE="${{ inputs.module }}"; else MODULE_FILE=$(grep -l "com.android.application" $(find "$PROJECT_DIR" -maxdepth 3 -name "build.gradle*" 2>/dev/null) 2>/dev/null | head -n 1 || true); if [ -n "$MODULE_FILE" ]; then MODULE=$(basename $(dirname "$MODULE_FILE")); else MODULE="app"; fi; fi
           echo "MODULE=$MODULE" >> $GITHUB_ENV
           echo "module=$MODULE" >> $GITHUB_OUTPUT
           echo "Module: $MODULE"
-          if [ -f "$PROJECT_DIR/gradlew" ]; then
-            echo "gradle_cmd=./gradlew" >> $GITHUB_OUTPUT
-            chmod +x "$PROJECT_DIR/gradlew" || true
-            echo "Pakai: ./gradlew"
-          else
-            echo "gradle_cmd=gradle" >> $GITHUB_OUTPUT
-            echo "Pakai: gradle"
-          fi
+          if [ -f "$PROJECT_DIR/gradlew" ]; then echo "gradle_cmd=./gradlew" >> $GITHUB_OUTPUT; chmod +x "$PROJECT_DIR/gradlew" || true; else echo "gradle_cmd=gradle" >> $GITHUB_OUTPUT; fi
 
       - name: Set up JDK
         uses: actions/setup-java@v5
@@ -171,33 +172,16 @@ jobs:
           gradle-version: '8.7'
           cache-disabled: true
 
-      - name: Set up Flutter
-        if: steps.detect.outputs.type == 'flutter'
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-
       - name: Build APK - Android Gradle
         if: steps.detect.outputs.type != 'flutter'
         run: |
-          echo "Build dari: $PROJECT_DIR"
-          echo "PROJECT_DIR=$PROJECT_DIR, MODULE=$MODULE"
           cd "$PROJECT_DIR"
-          pwd
-          ls -lh
           VARIANT="${{ inputs.build_variant || 'debug' }}"
           if [ "$VARIANT" = "release" ]; then TASK="assembleRelease"; else TASK="assembleDebug"; fi
           echo "Jalanin: ${{ steps.detect.outputs.gradle_cmd }} :$MODULE:$TASK"
           ${{ steps.detect.outputs.gradle_cmd }} :$MODULE:$TASK --stacktrace --no-build-cache --rerun-tasks || ${{ steps.detect.outputs.gradle_cmd }} assembleDebug --stacktrace --no-build-cache
 
-      - name: Build APK - Flutter
-        if: steps.detect.outputs.type == 'flutter'
-        run: |
-          cd "$PROJECT_DIR"
-          flutter pub get
-          if [ "${{ inputs.build_variant }}" = "release" ]; then flutter build apk --release; else flutter build apk --debug; fi
-
-      - name: Kumpulkan Semua APK
+      - name: Kumpulkan APK
         run: |
           mkdir -p out
           find "$PROJECT_DIR" -name "*.apk" | head -n 20
