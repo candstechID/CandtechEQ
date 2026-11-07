@@ -1,4 +1,4 @@
-name: Extract + Auto Patch Compose + Build APK (CLEAN v6)
+name: Extract + SDK 36 (Android 16) + Build APK (v8)
 
 on:
   workflow_dispatch:
@@ -13,41 +13,34 @@ jobs:
         run: |
           rm -rf extracted
           mkdir -p extracted
-          # Ambil HANYA 1 ZIP (yang pertama). Kalau ada >1 ZIP, yang lain diabaikan biar tidak dobel file _1
           ZIP=$(ls -t *.zip | head -n 1)
           echo "ZIP dipakai: $ZIP"
-          echo "Semua ZIP di repo:"
           ls -l *.zip
           unzip -q "$ZIP" -d extracted
-          echo "--- Cek file dobel _1 / _2 (penyebab Redeclaration) ---"
           find extracted -name "*_1.kt" -o -name "*_2.kt" | tee /tmp/dup.txt || true
-          if [ -s /tmp/dup.txt ]; then
-            echo "HAPUS file dobel _1/_2 yang kebawa di ZIP:"
-            cat /tmp/dup.txt
-            rm -f $(cat /tmp/dup.txt)
-          fi
-          echo "--- Struktur ---"
-          find extracted -maxdepth 3 -type d | head -n 20
-          # Cari PROJECT_DIR (folder yang ada settings.gradle.kts)
+          if [ -s /tmp/dup.txt ]; then rm -f $(cat /tmp/dup.txt); fi
           PROJECT_DIR=$(find extracted -name "settings.gradle.kts" -exec dirname {} \; | head -n 1)
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
           echo "PROJECT_DIR=$PROJECT_DIR"
 
-      - name: Auto Patch Compose 2.0.21 + hapus composeOptions
+      - name: Auto Patch - AGP 8.11.1 + SDK 36 + hapus composeOptions
         run: |
-          echo "Patch di $PROJECT_DIR"
-          # Root build.gradle.kts -> paksa 2.0.21
-          sed -i 's/version "2\.0\.0"/version "2.0.21"/g; s/version "2\.0\.20"/version "2.0.21"/g' "$PROJECT_DIR/build.gradle.kts" || true
-          # App build.gradle.kts -> hapus composeOptions lama (penyebab error composeOptions)
+          # Paksa AGP 8.11.1 (yang support compileSdk 36) + Kotlin/Compose 2.0.21
+          sed -i 's/version "8\.5\.2"/version "8.11.1"/g; s/version "8\.7\.3"/version "8.11.1"/g; s/version "8\.8\.0"/version "8.11.1"/g' "$PROJECT_DIR/build.gradle.kts" || true
+          # Paksa compileSdk/targetSdk 36
+          sed -i 's/compileSdk = 34/compileSdk = 36/g; s/targetSdk = 34/targetSdk = 36/g; s/compileSdk = 35/compileSdk = 36/g; s/targetSdk = 35/targetSdk = 36/g' "$PROJECT_DIR/app/build.gradle.kts" || true
           python3 - << 'PY'
           import pathlib, re, os
           p = pathlib.Path(os.environ["PROJECT_DIR"]) / "app/build.gradle.kts"
           t = p.read_text()
           t = re.sub(r'\s*composeOptions\s*\{[^}]*\}', '', t)
+          if "buildToolsVersion" not in t:
+              t = t.replace("compileSdk = 36", 'compileSdk = 36\n    buildToolsVersion = "36.0.0"')
           p.write_text(t)
-          print("composeOptions dihapus, sisa composeOptions?", "composeOptions" in t)
+          print("compileSdk 36?", "compileSdk = 36" in t, "targetSdk 36?", "targetSdk = 36" in t, "buildTools 36?", "36.0.0" in t)
           PY
           cat "$PROJECT_DIR/build.gradle.kts"
+          grep -E "compileSdk|targetSdk|buildToolsVersion" "$PROJECT_DIR/app/build.gradle.kts"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -55,8 +48,22 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # Gradle 8.14 = yang cocok untuk AGP 8.11.1 + SDK 36
+      - name: Set up Gradle 8.14
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14'
+
+      # JANGAN pakai setup-android@v3 - error package 'tools'. Pakai SDK bawaan runner.
+      - name: Pakai Android SDK 36 paling baru (Android 16)
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms" || true
+          ls "$ANDROID_HOME/build-tools" || true
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "platform-tools" || true
+          ls "$ANDROID_HOME/platforms/android-36" | head
+          ls "$ANDROID_HOME/build-tools/36.0.0" | head
 
       - name: Build APK - Android Gradle
         run: |
@@ -67,6 +74,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: CandstechEQ-debug
+          name: CandstechEQ-debug-SDK36
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
-          
